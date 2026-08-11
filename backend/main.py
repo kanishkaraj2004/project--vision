@@ -210,55 +210,127 @@ class VisionIRLApp:
             return False
 
     def preprocess_image(self, image):
-        """Preprocess image for ONNX model input"""
-        # Convert to RGB if needed
-        if len(image.shape) == 2:  # Grayscale
+        """Preprocess image according to ONNX model input"""
+
+        # Convert to RGB
+        if len(image.shape) == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        elif image.shape[2] == 4:  # RGBA
+        elif image.shape[2] == 4:
             image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-        elif image.shape[2] == 1:  # Single channel
+        elif image.shape[2] == 1:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            
-        # Resize to model input size (adjust based on your model requirements)
-        input_size = (640, 480,640)  # Example size, change as needed
-        image = cv2.resize(image, input_size)
-        
-        # Normalize and convert to float32
+
+        # Get the exact input shape expected by ONNX model
+        input_shape = self.ort_session.get_inputs()[0].shape
+
+        # Model format: [batch, channels, height, width]
+        model_height = int(input_shape[2])
+        model_width = int(input_shape[3])
+
+        print("ONNX input shape:", input_shape)
+        print("Resizing to:", model_width, "x", model_height)
+
+        # OpenCV resize takes (width, height)
+        image = cv2.resize(image, (model_width, model_height))
+
+        # Normalize
         image = image.astype(np.float32) / 255.0
-        
-        # Add batch dimension (assuming model expects NHWC format)
+
+        # HWC -> CHW
+        image = np.transpose(image, (2, 0, 1))
+
+        # Add batch dimension
         image = np.expand_dims(image, axis=0)
-        
+
+        print("Final image shape:", image.shape)
+
         return image
 
     def detect_face(self, image):
-        """Detect face using ONNX model"""
+        """Detect face using Qualcomm FaceDetLite ONNX model"""
+
         if self.ort_session is None:
             self.add_message("ONNX model not loaded", "system")
             return False
-            
+
         try:
-            # Preprocess the image
+            # Preprocess image
             input_image = self.preprocess_image(image)
-            
-            # Run inference
-            outputs = self.ort_session.run(self.output_names, {self.input_name: input_image})
-            
-            # Process outputs - adjust this based on your model's actual output
-            if not outputs or len(outputs) == 0:
+
+            # Run ONNX inference
+            outputs = self.ort_session.run(
+                self.output_names,
+                {self.input_name: input_image}
+            )
+
+            if len(outputs) < 3:
+                self.add_message(
+                    "Face model returned unexpected outputs",
+                    "error"
+                )
                 return False
-                
-            # Assuming first output contains detection results
-            detections = outputs[0]
-            
-            # Check if any detections meet confidence threshold
-            confidence_threshold = 0.7
-            for detection in detections:
-                if len(detection) > 4 and detection[4] > confidence_threshold:
-                    return True
-            return False
+
+            # Qualcomm FaceDetLite outputs:
+            # 0 = heatmap
+            # 1 = bounding boxes
+            # 2 = landmarks
+            hm = np.asarray(outputs[0])
+            box = np.asarray(outputs[1])
+            landmark = np.asarray(outputs[2])
+
+            print("Heatmap shape:", hm.shape)
+            print("Box shape:", box.shape)
+            print("Landmark shape:", landmark.shape)
+
+            # Apply sigmoid to heatmap
+            hm = 1.0 / (1.0 + np.exp(-hm))
+
+            # Remove batch/channel dimensions
+            hm_2d = np.squeeze(hm)
+
+            # Find highest-confidence face location
+            max_index = np.unravel_index(
+                np.argmax(hm_2d),
+                hm_2d.shape
+            )
+
+            cy, cx = max_index
+            confidence = float(hm_2d[cy, cx])
+
+            print("Face confidence:", confidence)
+
+            # Qualcomm reference uses 0.55 threshold
+            if confidence < 0.55:
+                return False
+
+            # Optional: decode bounding box
+            box_data = np.squeeze(box)
+
+            # Expected shape after squeeze: (4, H, W)
+            if box_data.ndim == 3 and box_data.shape[0] >= 4:
+
+                x, y, r, b = box_data[:, cy, cx][:4]
+
+                stride = 8
+
+                left = (cx - x) * stride
+                top = (cy - y) * stride
+                right = (cx + r) * stride
+                bottom = (cy + b) * stride
+
+                print(
+                    f"Face detected: confidence={confidence:.3f}, "
+                    f"box=({left:.0f}, {top:.0f}, "
+                    f"{right:.0f}, {bottom:.0f})"
+                )
+
+            return True
+
         except Exception as e:
-            self.add_message(f"Face detection error: {str(e)}", "system")
+            self.add_message(
+                f"Face detection error: {str(e)}",
+                "error"
+            )
             return False
 
     def face_verification(self):
@@ -302,16 +374,46 @@ class VisionIRLApp:
         # In a real implementation, you would add UI elements for this
         # For now, we'll just restart the authentication flow after a delay
         self.root.after(3000, lambda: threading.Thread(target=self.run_authentication_flow, daemon=True).start())
-
     def launch_vision(self):
-        """Launch the main vision system"""
+        """Launch the main object detection system"""
+
         self.add_message("Launching Vision System...", "system")
-        # Placeholder for actual vision system launch
-        # In a real implementation, this would start your main application
-        
-        # For demo purposes, we'll just show a success message
         self.speak("Vision System ready")
-        self.add_message("Vision System is now running", "system")
+
+        try:
+            # Get the folder where main.py is located
+            backend_dir = os.path.dirname(os.path.abspath(__file__))
+
+            # Path to obj.py
+            obj_path = os.path.join(backend_dir, "obj.py")
+
+            # Check whether obj.py exists
+            if not os.path.exists(obj_path):
+                raise FileNotFoundError(
+                    f"obj.py not found at:\n{obj_path}"
+                )
+
+            self.add_message(
+                "Starting object detection system...",
+                "system"
+            )
+
+            # Launch obj.py using the SAME Python/venv
+            subprocess.Popen(
+                [sys.executable, obj_path],
+                cwd=backend_dir
+            )
+
+            self.add_message(
+                "Vision System is now running",
+                "system"
+            )
+
+        except Exception as e:
+            self.add_message(
+                f"Failed to launch Vision System: {str(e)}",
+                "error"
+            )
 
     def run_authentication_flow(self):
         """Main authentication flow"""

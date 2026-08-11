@@ -11,6 +11,8 @@ import time
 import numpy as np
 
 import os
+import subprocess
+import sys
 
 import speech_recognition as sr
 
@@ -30,26 +32,41 @@ from scipy.spatial import distance as dist
 
 # Voice setup
 
-engine = pyttsx3.init()
-
-engine.setProperty('rate', 150)
-
-engine.setProperty('voice', engine.getProperty('voices')[1].id)
-
-
+# =========================
+# WINDOWS TEXT TO SPEECH
+# =========================
 
 def speak(text, print_text=True):
+    """Speak text using a separate Python process."""
 
-    """Speak text and optionally print to terminal"""
+    text = str(text)
 
     if print_text:
-
         print(f"[Assistant]: {text}")
 
-    engine.say(text)
+    try:
+        # Run TTS in a completely separate Python process.
+        # This prevents YOLO / MediaPipe / microphone threads
+        # from interfering with pyttsx3.
 
-    engine.runAndWait()
+        tts_code = (
+            "import pyttsx3; "
+            "e=pyttsx3.init(); "
+            "e.setProperty('rate', 150); "
+            "voices=e.getProperty('voices'); "
+            "e.setProperty('voice', voices[0].id) if voices else None; "
+            f"e.say({text!r}); "
+            "e.runAndWait(); "
+            "e.stop()"
+        )
 
+        subprocess.Popen(
+            [sys.executable, "-c", tts_code],
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+
+    except Exception as e:
+        print(f"[TTS ERROR]: {e}")
 
 
 class VisionAssistant:
@@ -741,4 +758,3 @@ def vision_system():
 if __name__ == "__main__":
 
     vision_system()
-
