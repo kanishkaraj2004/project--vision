@@ -79,8 +79,9 @@ Combines pose, gesture, and object tracking to detect suspicious behavior or obs
 ### 1. Clone the Repo
 
 ```bash
-git clone https://github.com/Anuzka-Sharma/VISION-IRL-Copy.git
-cd VISION-IRL-Copy
+git clone https://github.com/kanishkaraj2004/project--vision.git
+cd project--vision
+cd backend
 ```
 
 ### 2. Create and Activate Virtual Environment
